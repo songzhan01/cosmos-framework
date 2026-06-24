@@ -44,6 +44,7 @@ class CompileTokenizer(Callback):
         enabled: bool = False,
         compile_after_iterations: int = 3,
         warmup_resolutions: Sequence[str] | None = None,
+        aspect_ratio: str | None = None,
         backend: Literal["cudagraphs", "inductor"] = "inductor",
         mode: Literal["reduce-overhead", "max-autotune"] | None = "reduce-overhead",
         fullgraph: bool = False,
@@ -65,6 +66,7 @@ class CompileTokenizer(Callback):
         self.compile_after_iterations: int = compile_after_iterations
         self.skip_counter: int = 0
         self.warmup_resolutions: Sequence[str] | None = warmup_resolutions
+        self.aspect_ratio: str | None = aspect_ratio
         self.backend: Literal["cudagraphs", "inductor"] = backend
         self.mode: Literal["reduce-overhead", "max-autotune"] | None = mode
         self.fullgraph: bool = fullgraph
@@ -110,6 +112,7 @@ class CompileTokenizer(Callback):
                 tokenizer.compile_encode(
                     self.warmup_resolutions,
                     output_dir=self.config.job.path_local,
+                    aspect_ratio=self.aspect_ratio,
                     backend=self.backend,
                     mode=self.mode,
                     fullgraph=self.fullgraph,

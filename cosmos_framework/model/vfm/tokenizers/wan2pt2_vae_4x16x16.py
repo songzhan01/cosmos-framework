@@ -1272,6 +1272,7 @@ def _collect_warmup_shapes(
     """
     all_shapes: list[_ShapeInfo] = []
     for res_key in warmup_resolutions:
+        res_key = str(res_key)
         if res_key not in VIDEO_RES_SIZE_INFO:
             raise ValueError(f"Resolution {res_key} not found in VIDEO_RES_SIZE_INFO")
 
