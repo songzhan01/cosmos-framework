@@ -42,6 +42,8 @@ class ActionBaseDataset(ABC, Dataset):
         viewpoint: str,
         action_normalization: str | None = "quantile",
         sample_stride: int = 1,
+        load_rows: bool = True,
+        episode_columns: list[str] | None = None,
     ) -> None:
         super().__init__()
         if pose_convention != "backward_framewise":
@@ -64,23 +66,32 @@ class ActionBaseDataset(ABC, Dataset):
 
         self._root = Path(root)
         self._info = json.loads((self._root / "meta" / "info.json").read_text())
-        self._episodes = {
-            int(row["episode_index"]): row
-            for path in sorted((self._root / "meta" / "episodes").glob("chunk-*/file-*.parquet"))
-            for row in pq.read_table(path).to_pylist()
-        }
+        episode_paths = sorted((self._root / "meta" / "episodes").glob("chunk-*/file-*.parquet"))
+        self._episodes = {}
+        for path in episode_paths:
+            if episode_columns is None:
+                table = pq.read_table(path)
+            else:
+                schema_names = set(pq.ParquetFile(path).schema_arrow.names)
+                columns = [c for c in episode_columns if c in schema_names]
+                table = pq.read_table(path, columns=columns)
+            for row in table.to_pylist():
+                self._episodes[int(row["episode_index"])] = row
         self._tasks = {
             int(row["task_index"]): str(row["task"])
             for row in pq.read_table(self._root / "meta" / "tasks.parquet").to_pylist()
         }
-        self._rows = sorted(
-            (
-                row
-                for path in sorted((self._root / "data").glob("chunk-*/file-*.parquet"))
-                for row in pq.read_table(path).to_pylist()
-            ),
-            key=lambda row: int(row["index"]),
-        )
+        if load_rows:
+            self._rows = sorted(
+                (
+                    row
+                    for path in sorted((self._root / "data").glob("chunk-*/file-*.parquet"))
+                    for row in pq.read_table(path).to_pylist()
+                ),
+                key=lambda row: int(row["index"]),
+            )
+        else:
+            self._rows: list[dict[str, Any]] = []
 
     @property
     def fps(self) -> float:

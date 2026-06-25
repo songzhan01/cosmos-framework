@@ -275,6 +275,13 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # Auto-set TORCHINDUCTOR_MIX_ORDER_REDUCTION=0 for SM 12.0 (Blackwell) GPUs.
+    # SM 12.0's shared memory limit (101KB) is insufficient for TorchInductor's
+    # default mix-order reduction kernels (require 131KB), causing compile failures.
+    import torch
+    if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 12:
+        os.environ["TORCHINDUCTOR_MIX_ORDER_REDUCTION"] = "0"
+
     if args.deterministic:
         _setup_deterministic_env_and_backends()
 

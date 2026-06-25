@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 from pathlib import Path
 from typing import Any, Literal
@@ -27,10 +28,15 @@ from cosmos_framework.data.vfm.action.pose_utils import (
 PoseConvention = Literal["backward_framewise"]
 Viewpoint = Literal["concat_view"]
 
-_IMAGE_FEATURES = {
+_LEGACY_IMAGE_FEATURES = {
     "wrist": "observation.image.wrist_image_left",
     "left": "observation.image.exterior_image_1_left",
     "right": "observation.image.exterior_image_2_left",
+}
+_V30_IMAGE_FEATURES = {
+    "wrist": "observation.images.wrist_left",
+    "left": "observation.images.exterior_1_left",
+    "right": "observation.images.exterior_2_left",
 }
 _STATE_FEATURE = "observation.state.cartesian_position"
 # joint_pos (8D = 7 arm joints + gripper) features, matching the internal
@@ -39,10 +45,11 @@ _STATE_FEATURE = "observation.state.cartesian_position"
 # matching the internal canonical run which leaves action_normalization=None).
 _JOINT_ACTION_FEATURE = "action.joint_position"          # [7] commanded joints
 _ACTION_GRIPPER_FEATURE = "action.gripper_position"      # [1] commanded gripper
-_JOINT_STATE_FEATURE = "observation.state.joint_positions"   # [7] observed joints
+_LEGACY_JOINT_STATE_FEATURE = "observation.state.joint_positions"  # [7] observed joints
+_V30_JOINT_STATE_FEATURE = "observation.state.joint_position"  # [7] observed joints
 _GRIPPER_STATE_FEATURE = "observation.state.gripper_position"  # [1] observed gripper
 # Columns whose parquet dtype is a list<float> (need to_pylist -> stacked array).
-_LIST_COLUMNS = {_STATE_FEATURE, _JOINT_ACTION_FEATURE, _JOINT_STATE_FEATURE}
+_LIST_COLUMNS = {_STATE_FEATURE, _JOINT_ACTION_FEATURE, _LEGACY_JOINT_STATE_FEATURE, _V30_JOINT_STATE_FEATURE}
 _ACTION_SPACES = ("ee_pose", "joint_pos")
 
 # 90-degree clockwise rotation about the Z axis in the local frame. This matches
@@ -54,6 +61,20 @@ _DROID_TO_OPENCV: np.ndarray = np.array(
 
 _NORMALIZER_PATH = Path(__file__).parent / "stats/droid_lerobot_stats.json"
 
+def _arrow_numeric_column_to_numpy(column: Any, dtype: np.dtype = np.float32) -> np.ndarray:
+    """Convert an Arrow numeric or fixed-width list column to a dense numpy array."""
+    arr = column.combine_chunks()
+    if hasattr(arr, "offsets") and hasattr(arr, "values"):
+        offsets = np.asarray(arr.offsets.to_numpy(zero_copy_only=False))
+        values = np.asarray(arr.values.to_numpy(zero_copy_only=False), dtype=dtype)
+        if len(offsets) <= 1:
+            return values.reshape((len(arr), 0))
+        widths = offsets[1:] - offsets[:-1]
+        width = int(widths[0])
+        if not np.all(widths == width):
+            raise ValueError(f"Expected fixed-width list column, got variable widths for {column.type}")
+        return values.reshape((len(arr), width))
+    return np.asarray(arr.to_numpy(zero_copy_only=False), dtype=dtype)
 
 class DROIDLeRobotDataset(ActionBaseDataset):
     """DROID Action dataset.
@@ -94,7 +115,36 @@ class DROIDLeRobotDataset(ActionBaseDataset):
         if use_filter_dict and not filter_dict_path:
             raise ValueError("use_filter_dict=True requires filter_dict_path")
 
+        info = json.loads((Path(root) / "meta" / "info.json").read_text())
+        features = info.get("features", {})
+        if all(video_key in features for video_key in _V30_IMAGE_FEATURES.values()):
+            image_features = _V30_IMAGE_FEATURES
+        elif all(video_key in features for video_key in _LEGACY_IMAGE_FEATURES.values()):
+            image_features = _LEGACY_IMAGE_FEATURES
+        else:
+            raise ValueError(f"Unsupported DROID video feature schema under {root}")
+        if _V30_JOINT_STATE_FEATURE in features:
+            joint_state_feature = _V30_JOINT_STATE_FEATURE
+        elif _LEGACY_JOINT_STATE_FEATURE in features:
+            joint_state_feature = _LEGACY_JOINT_STATE_FEATURE
+        else:
+            raise ValueError(f"Unsupported DROID joint-state feature schema under {root}")
+
         # joint_pos uses raw joint values — disable normalization at the base level.
+        episode_columns = [
+            "episode_index",
+            "episode_id",
+            "data/chunk_index",
+            "data/file_index",
+        ]
+        for video_key in image_features.values():
+            episode_columns.extend(
+                [
+                    f"videos/{video_key}/chunk_index",
+                    f"videos/{video_key}/file_index",
+                    f"videos/{video_key}/from_timestamp",
+                ]
+            )
         super().__init__(
             root=root,
             domain_name="droid_lerobot",
@@ -105,8 +155,12 @@ class DROIDLeRobotDataset(ActionBaseDataset):
             tolerance_s=tolerance_s,
             viewpoint=viewpoint,
             action_normalization=None if action_space == "joint_pos" else action_normalization,
+            load_rows=False,
+            episode_columns=episode_columns,
         )
 
+        self._image_features = image_features
+        self._joint_state_feature = joint_state_feature
         self._action_space = action_space
         self._use_state = bool(use_state)
         # Per-sample image augmentation (random crop+rescale + color jitter), applied
@@ -128,24 +182,26 @@ class DROIDLeRobotDataset(ActionBaseDataset):
         # (~1 GB total) -- read-only after init, so worker forks share them
         # copy-on-write.
         if action_space == "joint_pos":
-            feature_cols = [_JOINT_ACTION_FEATURE, _ACTION_GRIPPER_FEATURE, _JOINT_STATE_FEATURE, _GRIPPER_STATE_FEATURE]
+            feature_cols = [_JOINT_ACTION_FEATURE, _ACTION_GRIPPER_FEATURE, self._joint_state_feature, _GRIPPER_STATE_FEATURE]
         else:
             feature_cols = [_STATE_FEATURE, _ACTION_GRIPPER_FEATURE]
         columns = ["index", "episode_index", "task_index", "timestamp", *feature_cols]
         index_parts, episode_parts, task_parts, ts_parts = [], [], [], []
         feature_parts: dict[str, list] = {c: [] for c in feature_cols}
-        for path in sorted((self._root / "data").glob("chunk-*/file-*.parquet")):
+        data_paths = sorted((self._root / "data").glob("chunk-*/file-*.parquet"))
+        if not data_paths:
+            raise FileNotFoundError(f"No DROID parquet files found under {self._root / 'data'}")
+        for path in data_paths:
             table = pq.read_table(path, columns=columns)
             index_parts.append(table["index"].to_numpy())
             episode_parts.append(table["episode_index"].to_numpy())
             task_parts.append(table["task_index"].to_numpy())
             ts_parts.append(table["timestamp"].to_numpy())
             for c in feature_cols:
-                if c in _LIST_COLUMNS:
-                    feature_parts[c].append(np.asarray(table[c].to_pylist(), dtype=np.float32))
-                else:
-                    feature_parts[c].append(np.asarray(table[c].to_numpy(), dtype=np.float32))
-        order = np.argsort(np.concatenate(index_parts).astype(np.int64), kind="stable")
+                feature_parts[c].append(_arrow_numeric_column_to_numpy(table[c], dtype=np.float32))
+
+        index_all = np.concatenate(index_parts).astype(np.int64)
+        order = np.argsort(index_all, kind="stable")
         self._row_episode = np.concatenate(episode_parts).astype(np.int64)[order]
         self._row_task = np.concatenate(task_parts).astype(np.int64)[order]
         self._row_timestamp = np.concatenate(ts_parts).astype(np.float64)[order]
@@ -161,7 +217,15 @@ class DROIDLeRobotDataset(ActionBaseDataset):
         # guard, so ~one chunk of samples per episode silently mixed two episodes;
         # restricting to in-episode windows yields ``total - n_episodes * chunk``
         # valid samples (matching the production dataset).
-        assert np.all(np.diff(self._row_episode) >= 0), "episode_index is not contiguous after sorting by frame index"
+        # Ensure episodes are contiguous: sort by (episode_index, timestamp)
+        # if the raw data has interleaved episodes across chunks.
+        if not np.all(np.diff(self._row_episode) >= 0):
+            sort_order = np.lexsort((self._row_timestamp, self._row_episode))
+            self._row_episode = self._row_episode[sort_order]
+            self._row_task = self._row_task[sort_order]
+            self._row_timestamp = self._row_timestamp[sort_order]
+            for c in self._feat:
+                self._feat[c] = self._feat[c][sort_order]
         ep_vals, ep_starts, ep_counts = np.unique(self._row_episode, return_index=True, return_counts=True)
         self._ep_vals = ep_vals.astype(np.int64)
         self._ep_starts = ep_starts.astype(np.int64)
@@ -197,6 +261,7 @@ class DROIDLeRobotDataset(ActionBaseDataset):
             self._seg_ep_pos = np.asarray(seg_ep_pos, dtype=np.int64)
             self._seg_win_start = np.asarray(seg_win_start, dtype=np.int64)
             self._seg_cum = np.cumsum(seg_len).astype(np.int64) if seg_len else np.zeros(0, dtype=np.int64)
+
 
     @property
     def action_dim(self) -> int:
@@ -279,7 +344,7 @@ class DROIDLeRobotDataset(ActionBaseDataset):
         action = np.concatenate([joints, gripper], axis=-1)  # [chunk, 8]
         if self._use_state:
             init = observation_rows[0]
-            init_joint = np.asarray(init[_JOINT_STATE_FEATURE], dtype=np.float32)  # [7]
+            init_joint = np.asarray(init[self._joint_state_feature], dtype=np.float32)  # [7]
             init_gripper = np.asarray([1.0 - float(init[_GRIPPER_STATE_FEATURE])], dtype=np.float32)  # [1]
             initial_state = np.concatenate([init_joint, init_gripper])[None, :]  # [1, 8]
             action = np.concatenate([initial_state, action], axis=0)  # [chunk + 1, 8]
@@ -297,7 +362,7 @@ class DROIDLeRobotDataset(ActionBaseDataset):
                 [float(episode.get(f"videos/{video_key}/from_timestamp", 0.0)) + ts for ts in timestamps],
                 self._tolerance_s,
             )
-            for name, video_key in _IMAGE_FEATURES.items()
+            for name, video_key in self._image_features.items()
         }
 
         wrist = frames_by_view["wrist"]
@@ -305,19 +370,25 @@ class DROIDLeRobotDataset(ActionBaseDataset):
         right = frames_by_view["right"]
 
         if self._use_image_augmentation:
-            # Random crop+rescale (spatial jitter) + color jitter, BEFORE the concat.
-            # All three views are stacked so one sampled set of params is applied
-            # uniformly across every frame and view (temporally + cross-view consistent),
-            # while each __getitem__ resamples. Matches the internal DROID recipe.
+            gpu_jitter = os.environ.get("COSMOS_GPU_COLOR_JITTER", "0") == "1"
             if self._image_augmentor is None:
                 _, _, h, w = wrist.shape
-                self._image_augmentor = T.Compose(
-                    [
-                        T.RandomCrop((int(h * 0.95), int(w * 0.95))),
-                        T.Resize((h, w), antialias=True),
-                        T.ColorJitter(brightness=0.3, contrast=0.4, saturation=0.5, hue=0.08),
-                    ]
-                )
+                if gpu_jitter:
+                    # Only RandomCrop + Resize on CPU; ColorJitter deferred to GPU.
+                    self._image_augmentor = T.Compose(
+                        [
+                            T.RandomCrop((int(h * 0.95), int(w * 0.95))),
+                            T.Resize((h, w), antialias=True),
+                        ]
+                    )
+                else:
+                    self._image_augmentor = T.Compose(
+                        [
+                            T.RandomCrop((int(h * 0.95), int(w * 0.95))),
+                            T.Resize((h, w), antialias=True),
+                            T.ColorJitter(brightness=0.3, contrast=0.4, saturation=0.5, hue=0.08),
+                        ]
+                    )
             n, m = wrist.shape[0], wrist.shape[0] + left.shape[0]
             combined = self._image_augmentor(torch.cat([wrist, left, right], dim=0))
             wrist, left, right = combined[:n], combined[n:m], combined[m:]

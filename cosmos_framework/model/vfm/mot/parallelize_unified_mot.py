@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: OpenMDW-1.1
 
 from typing import Callable
+import os
+import logging
 
 """FSDP / activation-checkpointing / torch.compile pass for the unified MoT.
 
@@ -153,12 +155,36 @@ def apply_ac(
     if config.mode == "none":
         return
 
+    # COSMOS_AC_LAYER_POLICY: comma-separated list of per-layer modes.
+    # Format: "full,full,...,none,none" (36 entries for 36 layers).
+    # Special values: "none" = no AC (save activations, no recompute),
+    # "full" = full AC (recompute entire block), "selective" = selective AC.
+    # If not set, all layers use `config.mode` (original behavior).
+    layer_policy_env = os.environ.get("COSMOS_AC_LAYER_POLICY", "")
+    layer_policies = None
+    if layer_policy_env:
+        layer_policies = [p.strip() for p in layer_policy_env.split(",")]
+        logging.info(f"Using per-layer AC policy: {len(layer_policies)} layers specified")
+
     layers = model.model.layers
+    num_layers = len(layers)
     for layer_id, transformer_block in layers.named_children():
-        transformer_block = _apply_ac_to_transformer_block(
-            transformer_block,
-            config,
-        )
+        lid = int(layer_id)
+        # Determine per-layer mode
+        if layer_policies and lid < len(layer_policies):
+            layer_mode = layer_policies[lid]
+        else:
+            layer_mode = config.mode
+
+        if layer_mode == "none":
+            # No checkpointing for this layer — saves all activations
+            pass
+        elif layer_mode == "full":
+            transformer_block = _apply_full_ac(transformer_block, config)
+        elif layer_mode == "selective":
+            transformer_block = _apply_selective_ac(transformer_block, config)
+        else:
+            transformer_block = _apply_ac_to_transformer_block(transformer_block, config)
         layers.register_module(layer_id, transformer_block)
 
 
