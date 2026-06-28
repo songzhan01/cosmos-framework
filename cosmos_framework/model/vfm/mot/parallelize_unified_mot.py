@@ -167,7 +167,6 @@ def apply_ac(
         logging.info(f"Using per-layer AC policy: {len(layer_policies)} layers specified")
 
     layers = model.model.layers
-    num_layers = len(layers)
     for layer_id, transformer_block in layers.named_children():
         lid = int(layer_id)
         # Determine per-layer mode
