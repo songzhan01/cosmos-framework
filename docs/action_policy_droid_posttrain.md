@@ -39,7 +39,10 @@ be provided per environment:
 
 1. **[Cosmos3-DROID](https://huggingface.co/datasets/nvidia/Cosmos3-DROID) dataset (in LeRobotDataset v3.0 format)** — pre-download the
    dataset and point `DROID_ROOT` at the resulting `…/Cosmos3-DROID/success` directory (must
-   contain `meta/info.json`).
+   contain `meta/info.json`). If `meta/tasks.parquet` has task text in the pandas index artifact
+   column `__index_level_0__` instead of the semantic `task` column, the loader handles both
+   schemas; optionally normalize it with `cosmos_framework.scripts.normalize_droid_tasks_parquet`
+   to keep the dataset metadata canonical.
 2. **DCP base checkpoint** — convert [Cosmos3-Nano](https://huggingface.co/nvidia/Cosmos3-Nano) to DCP and point
    `BASE_CHECKPOINT_PATH` at it (see [Full Reproduction](#full-reproduction)). Action heads are
    not loaded from it (they init fresh).
@@ -68,6 +71,15 @@ The OSS flow mirrors the other recipes (see [docs/training.md](./training.md)):
 
 ```shell
 # Step 1: prepare Cosmos3-DROID success split -> $DATASET_PATH (see "Inputs You Provide")
+
+# Optional: normalize LeRobot v3 tasks metadata if task text is stored in
+# the pandas index artifact column "__index_level_0__". The training loader
+# accepts both schemas; this step only makes meta/tasks.parquet canonical.
+# The script moves the original file to a timestamped backup and installs a
+# normalized meta/tasks.parquet with columns ["task_index", "task"].
+python -m cosmos_framework.scripts.normalize_droid_tasks_parquet \
+  /path/to/dataset/success \
+  --json
 
 # Step 2: convert the base checkpoint -> $BASE_CHECKPOINT_PATH
 python -m cosmos_framework.scripts.convert_model_to_dcp \

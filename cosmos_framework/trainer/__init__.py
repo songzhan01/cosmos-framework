@@ -138,11 +138,12 @@ class ImaginaireTrainer:
         )
         self.straggler_detector.initialize()
 
-        # GPU-accelerated ColorJitter: runs on CUDA after h2d, replacing CPU version.
+        # GPU-accelerated ColorJitter: params sampled on CPU (DataLoader worker),
+        # applied deterministically on GPU after h2d.
         self._gpu_color_jitter = None
         if _env_flag("COSMOS_GPU_COLOR_JITTER"):
             from cosmos_framework.data.vfm.action.gpu_color_jitter import GPUColorJitter
-            self._gpu_color_jitter = GPUColorJitter(brightness=0.3, contrast=0.4, saturation=0.5, hue=0.08)
+            self._gpu_color_jitter = GPUColorJitter()
             log.info("GPU ColorJitter enabled (runs after h2d, before forward)")
 
         # Send a TimeoutError if a training step takes over timeout_period seconds.
@@ -291,7 +292,9 @@ class ImaginaireTrainer:
                     # Move all tensors in the data batch to GPU device.
                     data_batch = misc.to(data_batch, device="cuda")
                     if self._gpu_color_jitter is not None and "video" in data_batch:
-                        data_batch["video"] = self._gpu_color_jitter(data_batch["video"])
+                        jitter_params = data_batch.pop("_jitter_params", None)
+                        if jitter_params is not None:
+                            data_batch["video"] = self._gpu_color_jitter(data_batch["video"], jitter_params)
                     # The actual training step.
                     self.callbacks.on_training_step_start(model, data_batch, iteration=iteration)
                     self.callbacks.on_training_step_batch_start(model, data_batch, iteration=iteration)

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 from pathlib import Path
@@ -51,6 +52,8 @@ _GRIPPER_STATE_FEATURE = "observation.state.gripper_position"  # [1] observed gr
 # Columns whose parquet dtype is a list<float> (need to_pylist -> stacked array).
 _LIST_COLUMNS = {_STATE_FEATURE, _JOINT_ACTION_FEATURE, _LEGACY_JOINT_STATE_FEATURE, _V30_JOINT_STATE_FEATURE}
 _ACTION_SPACES = ("ee_pose", "joint_pos")
+
+logger = logging.getLogger(__name__)
 
 # 90-degree clockwise rotation about the Z axis in the local frame. This matches
 # the production DROID wrapper conversion from Franka panda_link8 to OpenCV.
@@ -291,6 +294,27 @@ class DROIDLeRobotDataset(ActionBaseDataset):
         ]
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
+        # Skip samples with DROID AV1 video decode/indexing failures and retry
+        # with a random different sample so one bad video window does not stop
+        # a long training run.
+        for attempt in range(5):
+            try:
+                return self._get_sample(idx)
+            except (IndexError, OSError, RuntimeError) as exc:
+                new_idx = random.randint(0, len(self) - 1)
+                logger.error(
+                    "Skipping DROID sample idx=%s after video decode/indexing error "
+                    "(attempt %s/5); retrying with idx=%s: %s",
+                    idx,
+                    attempt + 1,
+                    new_idx,
+                    exc,
+                    exc_info=True,
+                )
+                idx = new_idx
+        return self._get_sample(idx)
+
+    def _get_sample(self, idx: int) -> dict[str, Any]:
         mode = self._choose_mode()
         idx = int(idx)
         # Map the flat sample index to a within-episode frame window.
@@ -319,7 +343,7 @@ class DROIDLeRobotDataset(ActionBaseDataset):
         task = self._tasks[int(observation_rows[0]["task_index"])]
         ai_caption = random.choice(task.split(" | "))
 
-        return self._build_result(
+        result = self._build_result(
             mode=mode,
             video=video,
             action=raw_action,
@@ -330,6 +354,10 @@ class DROIDLeRobotDataset(ActionBaseDataset):
             ),
             **extras,
         )
+        # Sample ColorJitter params on CPU (same RNG as original CPU path) for GPU apply.
+        if hasattr(self, '_gpu_jitter_params') and self._gpu_jitter_params is not None:
+            result["_jitter_params"] = self._gpu_jitter_params.sample()
+        return result
 
     def _build_joint_action(self, observation_rows: list[dict[str, Any]]) -> torch.Tensor:
         """8D joint-position action ``[joint(7), gripper(1)]`` over the chunk, matching
@@ -380,6 +408,10 @@ class DROIDLeRobotDataset(ActionBaseDataset):
                             T.RandomCrop((int(h * 0.95), int(w * 0.95))),
                             T.Resize((h, w), antialias=True),
                         ]
+                    )
+                    from cosmos_framework.data.vfm.action.gpu_color_jitter import GPUColorJitterParams
+                    self._gpu_jitter_params = GPUColorJitterParams(
+                        brightness=0.3, contrast=0.4, saturation=0.5, hue=0.08
                     )
                 else:
                     self._image_augmentor = T.Compose(

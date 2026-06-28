@@ -77,9 +77,23 @@ class ActionBaseDataset(ABC, Dataset):
                 table = pq.read_table(path, columns=columns)
             for row in table.to_pylist():
                 self._episodes[int(row["episode_index"])] = row
+        tasks_table = pq.read_table(self._root / "meta" / "tasks.parquet")
+        if "task" in tasks_table.column_names:
+            task_text_column = "task"
+        elif "__index_level_0__" in tasks_table.column_names:
+            # Some LeRobot v3 exports wrote the task text as an unnamed pandas
+            # index, which pyarrow materializes as "__index_level_0__" in
+            # meta/tasks.parquet. This is metadata recovery, not a model input
+            # feature.
+            task_text_column = "__index_level_0__"
+        else:
+            raise KeyError(
+                "meta/tasks.parquet must contain either 'task' or '__index_level_0__' "
+                f"as the task text column; got columns {tasks_table.column_names}"
+            )
         self._tasks = {
-            int(row["task_index"]): str(row["task"])
-            for row in pq.read_table(self._root / "meta" / "tasks.parquet").to_pylist()
+            int(row["task_index"]): str(row[task_text_column])
+            for row in tasks_table.to_pylist()
         }
         if load_rows:
             self._rows = sorted(

@@ -46,6 +46,7 @@ def custom_collate_fn(batch):
         "raw_action_dim",
         "image_size",
         "action_processing_record",
+        "_jitter_params",
     }
 
     # Data keys where a per-sample value of ``None`` is a meaningful signal
