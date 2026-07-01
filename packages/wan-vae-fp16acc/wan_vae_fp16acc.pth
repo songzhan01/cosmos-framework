@@ -1,0 +1,1 @@
+import wan_vae_fp16acc._boot; wan_vae_fp16acc._boot.bootstrap()
