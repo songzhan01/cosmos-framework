@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: OpenMDW-1.1
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wan-vae-fp16acc"
+version = "0.1.0"
+description = "fp16-acc CausalConv3d patch for Wan2.2 VAE encoder (consumer GeForce 2x TC uplift)"
+requires-python = ">=3.10"
+dependencies = ["torch"]
+
+[tool.setuptools]
+packages = ["wan_vae_fp16acc"]
+
+# Ship the prebuilt CUTLASS .so (if present) and the JIT-fallback source with the
+# package. The .so is built by build_so.sh before `pip install`/wheel build.
+[tool.setuptools.package-data]
+wan_vae_fp16acc = ["lib/*.so", "lib/.gitkeep", "cutlass_conv3d_ext.cu"]
