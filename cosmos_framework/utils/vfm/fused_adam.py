@@ -182,6 +182,10 @@ class FusedAdam(torch.optim.Optimizer):
                         "FusedAdam does not support sparse gradients, please consider SparseAdam instead"
                     )
 
+                local_grad = get_local_tensor_if_DTensor(p.grad)
+                if local_grad.numel() == 0:
+                    continue
+
                 state = self.state[p]
                 # State initialization
                 if len(state) == 0:
@@ -193,21 +197,21 @@ class FusedAdam(torch.optim.Optimizer):
                 if p.dtype == torch.float16:
                     if self.master_weights:
                         p_16_master.append(get_local_tensor_if_DTensor(p_master))
-                    g_16.append(get_local_tensor_if_DTensor(p.grad))
+                    g_16.append(local_grad)
                     p_16.append(get_local_tensor_if_DTensor(p))
                     m_16.append(get_local_tensor_if_DTensor(state["exp_avg"]))
                     v_16.append(get_local_tensor_if_DTensor(state["exp_avg_sq"]))
                 elif p.dtype == torch.bfloat16:
                     if self.master_weights:
                         bf16_master.append(get_local_tensor_if_DTensor(p_master))
-                    g_bf.append(get_local_tensor_if_DTensor(p.grad))
+                    g_bf.append(local_grad)
                     p_bf.append(get_local_tensor_if_DTensor(p))
                     m_bf.append(get_local_tensor_if_DTensor(state["exp_avg"]))
                     v_bf.append(get_local_tensor_if_DTensor(state["exp_avg_sq"]))
                 elif p.dtype == torch.float32:
                     if self.master_weights:
                         p_32_master.append(get_local_tensor_if_DTensor(p_master))
-                    g_32.append(get_local_tensor_if_DTensor(p.grad))
+                    g_32.append(local_grad)
                     p_32.append(get_local_tensor_if_DTensor(p))
                     m_32.append(get_local_tensor_if_DTensor(state["exp_avg"]))
                     v_32.append(get_local_tensor_if_DTensor(state["exp_avg_sq"]))
